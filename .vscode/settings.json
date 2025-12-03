@@ -1,0 +1,9 @@
+{
+  "gopls": {
+    "buildFlags": []
+  },
+  "go.buildTags": "cgo",
+  "go.toolsEnvVars": {
+    "CGO_ENABLED": "1"
+  }
+}

@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package opencoin.v1;
+
+option go_package = "github.com/georgecane/opencoin/pb/opencoin/v1";
+
+// Transaction represents a transaction in the blockchain
+message Transaction {
+  string id = 1;
+  string from = 2;
+  string to = 3;
+  uint64 amount = 4;
+  ContractCall contract = 5;
+  uint64 nonce = 6;
+  int64 timestamp = 7;
+  bytes signature = 8;
+}
+
+// ContractCall represents a smart contract invocation
+message ContractCall {
+  string address = 1;
+  string method = 2;
+  repeated bytes args = 3;
+  uint64 gas = 4;
+}
+
+// Block represents a block in the DAG
+message Block {
+  string hash = 1;
+  uint64 height = 2;
+  int64 timestamp = 3;
+  string proposer = 4;
+  repeated string parents = 5;
+  repeated Transaction txs = 6;
+  string state_root = 7;
+  bytes signature = 8;
+}
+
+// Validator represents a validator in DPoS
+message Validator {
+  string address = 1;
+  bytes public_key = 2;
+  uint64 power = 3;
+  uint64 stake = 4;
+  map<string, uint64> delegations = 5;
+  uint32 commission = 6;
+}
+
+// AccountState represents account balance and nonce
+message AccountState {
+  string address = 1;
+  uint64 balance = 2;
+  uint64 nonce = 3;
+  bytes code = 4;
+}
+
+// Contract represents a deployed smart contract
+message Contract {
+  string address = 1;
+  string owner = 2;
+  bytes code = 3;
+  uint64 balance = 4;
+  map<string, bytes> storage = 5;
+  int64 deployed = 6;
+}
