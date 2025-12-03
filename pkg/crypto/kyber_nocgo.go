@@ -2,18 +2,20 @@
 
 package crypto
 
-import "errors"
+import (
+	"errors"
+)
 
-// Fallback implementations when cgo is disabled. These return explicit errors.
+var errKyberCGODisabled = errors.New("kyber: CGO not enabled; build with CGO to use native Kyber implementation")
 
 func GenerateKyber768KeypairC() (pk, sk []byte, err error) {
-	return nil, nil, errors.New("kyber: CGO disabled; no kyber implementation available")
+	return nil, nil, errKyberCGODisabled
 }
 
 func EncapsulateKyber768C(pk []byte) (ct, ss []byte, err error) {
-	return nil, nil, errors.New("kyber: CGO disabled; no kyber implementation available")
+	return nil, nil, errKyberCGODisabled
 }
 
 func DecapsulateKyber768C(sk, ct []byte) (ss []byte, err error) {
-	return nil, errors.New("kyber: CGO disabled; no kyber implementation available")
+	return nil, errKyberCGODisabled
 }
