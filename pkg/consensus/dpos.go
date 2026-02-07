@@ -2,180 +2,152 @@ package consensus
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/georgecane/opencoin/pkg/types"
 )
 
-// DPoSEngine manages Delegated Proof of Stake
-type DPoSEngine struct {
+// DPoS manages validator registration, delegation, and slashing.
+type DPoS struct {
 	mu            sync.RWMutex
-	validators    *types.ValidatorSet
-	delegations   map[string][]*types.DelegationRecord
+	validators    map[types.Address]*types.Validator
 	minStake      uint64
 	maxValidators uint32
 }
 
-// NewDPoSEngine creates a new DPoS engine
-func NewDPoSEngine(minStake uint64, maxValidators uint32) *DPoSEngine {
-	return &DPoSEngine{
-		validators:    &types.ValidatorSet{Validators: make(map[string]*types.Validator)},
-		delegations:   make(map[string][]*types.DelegationRecord),
+// NewDPoS creates a new DPoS manager.
+func NewDPoS(minStake uint64, maxValidators uint32) *DPoS {
+	return &DPoS{
+		validators:    make(map[types.Address]*types.Validator),
 		minStake:      minStake,
 		maxValidators: maxValidators,
 	}
 }
 
-// RegisterValidator registers a new validator
-func (d *DPoSEngine) RegisterValidator(address string, publicKey []byte, stake uint64) error {
+// RegisterValidator registers a new validator.
+func (d *DPoS) RegisterValidator(address types.Address, publicKey []byte, stake uint64, commission uint16) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if stake < d.minStake {
 		return fmt.Errorf("stake below minimum: %d < %d", stake, d.minStake)
 	}
-
-	if _, exists := d.validators.Validators[address]; exists {
+	if _, exists := d.validators[address]; exists {
 		return fmt.Errorf("validator already registered: %s", address)
 	}
-
-	if uint32(len(d.validators.Validators)) >= d.maxValidators {
+	if uint32(len(d.validators)) >= d.maxValidators {
 		return fmt.Errorf("max validators reached: %d", d.maxValidators)
 	}
 
-	validator := &types.Validator{
+	d.validators[address] = &types.Validator{
 		Address:     address,
 		PublicKey:   publicKey,
+		Power:       stake,
 		Stake:       stake,
-		Power:       stake, // Initial power equals stake
-		Delegations: make(map[string]uint64),
-		Commission:  1000, // 10% commission
+		Delegations: make(map[types.Address]uint64),
+		Commission:  commission,
 	}
-
-	d.validators.Validators[address] = validator
-	d.validators.TotalPower += stake
-
 	return nil
 }
 
-// Delegate allows an account to delegate stake to a validator
-func (d *DPoSEngine) Delegate(delegator, validator string, amount uint64) error {
+// Delegate delegates stake to a validator.
+func (d *DPoS) Delegate(delegator types.Address, validator types.Address, amount uint64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	v, exists := d.validators.Validators[validator]
-	if !exists {
+	v, ok := d.validators[validator]
+	if !ok {
 		return fmt.Errorf("validator not found: %s", validator)
 	}
-
 	if amount == 0 {
 		return fmt.Errorf("delegation amount must be positive")
 	}
-
-	// Record delegation
-	delegation := &types.DelegationRecord{
-		Delegator: delegator,
-		Validator: validator,
-		Amount:    amount,
-	}
-
-	d.delegations[delegator] = append(d.delegations[delegator], delegation)
-
-	// Update validator delegations
 	v.Delegations[delegator] += amount
 	v.Power += amount
-	d.validators.TotalPower += amount
-
 	return nil
 }
 
-// Undelegate removes a delegation
-func (d *DPoSEngine) Undelegate(delegator, validator string, amount uint64) error {
+// Undelegate removes a delegation.
+func (d *DPoS) Undelegate(delegator types.Address, validator types.Address, amount uint64) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	v, exists := d.validators.Validators[validator]
-	if !exists {
+	v, ok := d.validators[validator]
+	if !ok {
 		return fmt.Errorf("validator not found: %s", validator)
 	}
-
-	delegated, hasDelegation := v.Delegations[delegator]
-	if !hasDelegation || delegated < amount {
-		return fmt.Errorf("insufficient delegation: %d < %d", delegated, amount)
+	delegated := v.Delegations[delegator]
+	if delegated < amount {
+		return fmt.Errorf("insufficient delegation")
 	}
-
 	v.Delegations[delegator] -= amount
 	v.Power -= amount
-	d.validators.TotalPower -= amount
-
 	return nil
 }
 
-// GetValidatorSet returns the current validator set
-func (d *DPoSEngine) GetValidatorSet() *types.ValidatorSet {
+// SlashDoubleSign slashes and jails a validator for double-signing.
+func (d *DPoS) SlashDoubleSign(validator types.Address, slashBps uint64, jailEpochs uint64, currentEpoch uint64) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	v, ok := d.validators[validator]
+	if !ok {
+		return fmt.Errorf("validator not found: %s", validator)
+	}
+	slashAmount := (v.Stake * slashBps) / 10000
+	if v.Stake >= slashAmount {
+		v.Stake -= slashAmount
+	}
+	v.Power = v.Stake
+	v.JailedUntilEpoch = currentEpoch + jailEpochs
+	return nil
+}
+
+// SlashOffline slashes and jails a validator for downtime.
+func (d *DPoS) SlashOffline(validator types.Address, slashBps uint64, jailEpochs uint64, currentEpoch uint64) error {
+	return d.SlashDoubleSign(validator, slashBps, jailEpochs, currentEpoch)
+}
+
+// ValidatorSet returns the current validator set ordered by power, then address.
+func (d *DPoS) ValidatorSet() *types.ValidatorSet {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	// Return a copy to prevent external modification
-	validatorsCopy := make(map[string]*types.Validator)
-	for k, v := range d.validators.Validators {
-		validatorCopy := *v
-		validatorsCopy[k] = &validatorCopy
+	validators := make([]*types.Validator, 0, len(d.validators))
+	var totalPower uint64
+	for _, v := range d.validators {
+		copyV := *v
+		validators = append(validators, &copyV)
+		totalPower += v.Power
+	}
+	sort.Slice(validators, func(i, j int) bool {
+		if validators[i].Power == validators[j].Power {
+			return validators[i].Address < validators[j].Address
+		}
+		return validators[i].Power > validators[j].Power
+	})
+
+	index := make(map[types.Address]uint32)
+	for i, v := range validators {
+		v.Index = uint32(i)
+		index[v.Address] = uint32(i)
 	}
 
 	return &types.ValidatorSet{
-		Validators: validatorsCopy,
-		TotalPower: d.validators.TotalPower,
+		Validators:  validators,
+		TotalPower:  totalPower,
+		IndexByAddr: index,
 	}
 }
 
-// GetValidator returns a specific validator
-func (d *DPoSEngine) GetValidator(address string) *types.Validator {
+// GetValidator returns a validator by address.
+func (d *DPoS) GetValidator(address types.Address) *types.Validator {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-
-	if v, ok := d.validators.Validators[address]; ok {
-		validatorCopy := *v
-		return &validatorCopy
+	v, ok := d.validators[address]
+	if !ok {
+		return nil
 	}
-	return nil
-}
-
-// DistributeRewards distributes block rewards to validators and delegators
-func (d *DPoSEngine) DistributeRewards(blockReward uint64, proposer string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	v, exists := d.validators.Validators[proposer]
-	if !exists {
-		return fmt.Errorf("validator not found: %s", proposer)
-	}
-
-	// Proposer gets the block reward
-	v.Stake += blockReward
-
-	// Distribute to delegators based on commission
-	commission := (blockReward * uint64(v.Commission)) / 10000
-	delegatorReward := blockReward - commission
-
-	// Proportionally distribute to delegators
-	for delegator, amount := range v.Delegations {
-		if v.Power > 0 {
-			share := (delegatorReward * amount) / v.Power
-			// TODO: Track delegator rewards in separate structure
-			_ = delegator
-			_ = share
-		}
-	}
-
-	return nil
-}
-
-// ValidateBlock checks if a block proposer is a valid validator
-func (d *DPoSEngine) ValidateBlock(proposer string) bool {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	_, exists := d.validators.Validators[proposer]
-	return exists
+	copyV := *v
+	return &copyV
 }

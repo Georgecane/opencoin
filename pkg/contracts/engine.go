@@ -8,6 +8,7 @@ import (
 	"github.com/georgecane/opencoin/pkg/types"
 	"github.com/tetratelabs/wazero"
 	wazeroapi "github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/experimental"
 )
 
 // ContractEngine manages smart contract execution
@@ -21,6 +22,8 @@ type ContractEngine struct {
 	runtime  wazero.Runtime
 	compiled map[string]wazero.CompiledModule
 	modules  map[string]wazeroapi.Module
+	maxCallDepth int
+	metrics      map[string]contractMetrics
 }
 
 // Contract represents a deployed smart contract
@@ -43,10 +46,17 @@ type ExecutionContext struct {
 	State        map[string][]byte
 }
 
+// ExecutionResult contains execution metadata for RC accounting.
+type ExecutionResult struct {
+	Output       []byte
+	Instructions uint64
+	StateWrites  uint64
+}
+
 // NewContractEngine creates a new contract engine
 func NewContractEngine() *ContractEngine {
 	ctx := context.Background()
-	r := wazero.NewRuntime(ctx)
+	r := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithMemoryLimitPages(1024))
 	return &ContractEngine{
 		contracts: make(map[string]*Contract),
 		code:      make(map[string][]byte),
@@ -54,6 +64,8 @@ func NewContractEngine() *ContractEngine {
 		ctx:       ctx,
 		runtime:   r,
 		modules:   make(map[string]wazeroapi.Module),
+		maxCallDepth: 32,
+		metrics:  make(map[string]contractMetrics),
 	}
 }
 
@@ -82,13 +94,22 @@ func (ce *ContractEngine) DeployContract(owner string, wasmCode []byte, address 
 	ce.code[address] = wasmCode
 	ce.state[address] = make(map[string][]byte)
 
+	if err := ValidateWasmCode(wasmCode); err != nil {
+		return err
+	}
+
+	ce.metrics[address] = contractMetrics{
+		InstructionEstimate: estimateInstructions(wasmCode),
+		StateWriteEstimate:  1,
+	}
+
 	// Try to compile/instantiate the module so errors surface early
 	if len(wasmCode) > 0 {
-		compiled, err := ce.runtime.CompileModule(ce.ctx, wasmCode)
+		compiled, err := ce.runtime.CompileModule(ce.withCallDepthListener(), wasmCode)
 		if err != nil {
 			return fmt.Errorf("failed to compile wasm module: %w", err)
 		}
-		mod, err := ce.runtime.InstantiateModule(ce.ctx, compiled, wazero.NewModuleConfig())
+		mod, err := ce.runtime.InstantiateModule(ce.withCallDepthListener(), compiled, wazero.NewModuleConfig())
 		if err != nil {
 			return fmt.Errorf("failed to instantiate wasm module: %w", err)
 		}
@@ -121,11 +142,11 @@ func (ce *ContractEngine) ExecuteContract(ctx *ExecutionContext) ([]byte, error)
 
 	if !ok {
 		// compile and instantiate on demand
-		compiled, err := ce.runtime.CompileModule(ce.ctx, contract.Code)
+		compiled, err := ce.runtime.CompileModule(ce.withCallDepthListener(), contract.Code)
 		if err != nil {
 			return nil, fmt.Errorf("failed to compile wasm module: %w", err)
 		}
-		m, err := ce.runtime.InstantiateModule(ce.ctx, compiled, wazero.NewModuleConfig())
+		m, err := ce.runtime.InstantiateModule(ce.withCallDepthListener(), compiled, wazero.NewModuleConfig())
 		if err != nil {
 			return nil, fmt.Errorf("failed to instantiate wasm module: %w", err)
 		}
@@ -144,7 +165,7 @@ func (ce *ContractEngine) ExecuteContract(ctx *ExecutionContext) ([]byte, error)
 	}
 
 	// Call the function with no parameters
-	results, err := fn.Call(ce.ctx)
+	results, err := fn.Call(ce.withCallDepthListener())
 	if err != nil {
 		return nil, fmt.Errorf("wasm contract handle failed: %w", err)
 	}
@@ -167,6 +188,22 @@ func (ce *ContractEngine) ExecuteContract(ctx *ExecutionContext) ([]byte, error)
 	}
 
 	return nil, nil
+}
+
+// ExecuteContract returns execution result with instruction and state write estimates.
+func (ce *ContractEngine) ExecuteContractWithResult(ctx *ExecutionContext) (*ExecutionResult, error) {
+	output, err := ce.ExecuteContract(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ce.mu.RLock()
+	metrics := ce.metrics[ctx.ContractAddr]
+	ce.mu.RUnlock()
+	return &ExecutionResult{
+		Output:       output,
+		Instructions: metrics.InstructionEstimate,
+		StateWrites:  metrics.StateWriteEstimate,
+	}, nil
 }
 
 // GetContract returns a contract by address
@@ -250,6 +287,77 @@ func ValidateWasmCode(code []byte) error {
 		return fmt.Errorf("invalid WASM magic number")
 	}
 
-	// TODO: Full WASM validation using wasmer
+	// Reject floating-point opcodes deterministically.
+	if containsFloatOpcodes(code) {
+		return fmt.Errorf("wasm contains floating-point opcodes")
+	}
 	return nil
+}
+
+type contractMetrics struct {
+	InstructionEstimate uint64
+	StateWriteEstimate  uint64
+}
+
+// EstimateInstructions returns a deterministic instruction estimate for a WASM module.
+func (ce *ContractEngine) EstimateInstructions(wasmCode []byte) uint64 {
+	return estimateInstructions(wasmCode)
+}
+
+// EstimateContractCall returns a cached instruction estimate.
+func (ce *ContractEngine) EstimateContractCall(address string) uint64 {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+	return ce.metrics[address].InstructionEstimate
+}
+
+// EstimateStateWrites returns a cached write estimate.
+func (ce *ContractEngine) EstimateStateWrites(address string) uint64 {
+	ce.mu.RLock()
+	defer ce.mu.RUnlock()
+	return ce.metrics[address].StateWriteEstimate
+}
+
+func (ce *ContractEngine) withCallDepthListener() context.Context {
+	factory := experimental.FunctionListenerFactoryFunc(func(def wazeroapi.FunctionDefinition) experimental.FunctionListener {
+		return experimental.FunctionListenerFunc(func(ctx context.Context, mod wazeroapi.Module, def wazeroapi.FunctionDefinition, params []uint64, stack experimental.StackIterator) {
+			depth := 0
+			for stack.Next() {
+				depth++
+			}
+			if depth > ce.maxCallDepth {
+				panic(fmt.Errorf("wasm max call depth exceeded: %d", depth))
+			}
+		})
+	})
+	return experimental.WithFunctionListenerFactory(ce.ctx, factory)
+}
+
+func estimateInstructions(wasmCode []byte) uint64 {
+	// Deterministic upper-bound estimate based on code section size.
+	return uint64(len(wasmCode))
+}
+
+// containsFloatOpcodes scans the code section for float opcode bytes.
+// This is a conservative check that may reject some valid code, but is deterministic.
+func containsFloatOpcodes(wasmCode []byte) bool {
+	// float-related opcodes in WASM (subset)
+	floatOpcodes := map[byte]struct{}{
+		0x43: {}, // f32.const
+		0x44: {}, // f64.const
+		0x8b: {}, // f32.add
+		0x8c: {}, // f32.sub
+		0x8d: {}, // f32.mul
+		0x8e: {}, // f32.div
+		0x99: {}, // f64.add
+		0x9a: {}, // f64.sub
+		0x9b: {}, // f64.mul
+		0x9c: {}, // f64.div
+	}
+	for _, b := range wasmCode {
+		if _, ok := floatOpcodes[b]; ok {
+			return true
+		}
+	}
+	return false
 }

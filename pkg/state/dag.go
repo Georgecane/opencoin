@@ -2,205 +2,113 @@ package state
 
 import (
 	"fmt"
-	"sort"
 	"sync"
 
 	"github.com/georgecane/opencoin/pkg/types"
 )
 
-// DAGState manages the DAG-based state of the blockchain
-type DAGState struct {
+// DAG manages state versioning nodes.
+type DAG struct {
 	mu       sync.RWMutex
-	vertices map[string]*types.DAGVertex
-	tips     []*types.DAGVertex // frontier (recent blocks)
-	accounts map[string]*types.AccountState
-	order    uint64 // counter for topological order
+	nodes    map[types.Hash]*types.StateNode
+	children map[types.Hash][]types.Hash
+	tips     []types.Hash
 }
 
-// NewDAGState creates a new DAG state manager
-func NewDAGState() *DAGState {
-	return &DAGState{
-		vertices: make(map[string]*types.DAGVertex),
-		tips:     make([]*types.DAGVertex, 0),
-		accounts: make(map[string]*types.AccountState),
-		order:    0,
+// NewDAG creates a new DAG.
+func NewDAG() *DAG {
+	return &DAG{
+		nodes:    make(map[types.Hash]*types.StateNode),
+		children: make(map[types.Hash][]types.Hash),
+		tips:     make([]types.Hash, 0),
 	}
 }
 
-// AddBlock adds a new block to the DAG
-func (ds *DAGState) AddBlock(block *types.Block) error {
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
+// AddNode inserts a new StateNode.
+func (d *DAG) AddNode(node *types.StateNode) error {
+	if node == nil {
+		return fmt.Errorf("state node is nil")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
 
-	if _, exists := ds.vertices[block.Hash]; exists {
-		return fmt.Errorf("block %s already exists", block.Hash)
+	if _, exists := d.nodes[node.RootHash]; exists {
+		return fmt.Errorf("state node already exists: %s", node.RootHash.String())
 	}
 
-	vertex := &types.DAGVertex{
-		BlockHash: block.Hash,
-		Block:     block,
-		Parents:   make([]*types.DAGVertex, 0),
-		Children:  make([]*types.DAGVertex, 0),
+	d.nodes[node.RootHash] = node
+	for _, parent := range node.Parents {
+		d.children[parent] = append(d.children[parent], node.RootHash)
 	}
 
-	// Link to parents
-	for _, parentHash := range block.Parents {
-		if parentVertex, ok := ds.vertices[parentHash]; ok {
-			vertex.Parents = append(vertex.Parents, parentVertex)
-			parentVertex.Children = append(parentVertex.Children, vertex)
-		}
-	}
-
-	ds.vertices[block.Hash] = vertex
-
-	// Update tips (remove parents from tips, add this vertex)
-	ds.updateTips(vertex, block.Parents)
-
-	// Compute topological order
-	ds.order++
-	vertex.Order = ds.order
-
+	d.updateTips(node.RootHash, node.Parents)
 	return nil
 }
 
-// updateTips updates the frontier of the DAG
-func (ds *DAGState) updateTips(newVertex *types.DAGVertex, parentHashes []string) {
-	// Remove parents from tips
-	newTips := make([]*types.DAGVertex, 0)
-	parentSet := make(map[string]bool)
-	for _, h := range parentHashes {
-		parentSet[h] = true
+// updateTips updates the DAG frontier tips.
+func (d *DAG) updateTips(newNode types.Hash, parents []types.Hash) {
+	parentSet := make(map[types.Hash]struct{}, len(parents))
+	for _, p := range parents {
+		parentSet[p] = struct{}{}
 	}
-
-	for _, tip := range ds.tips {
-		if !parentSet[tip.BlockHash] {
-			newTips = append(newTips, tip)
+	next := make([]types.Hash, 0, len(d.tips)+1)
+	for _, tip := range d.tips {
+		if _, ok := parentSet[tip]; !ok {
+			next = append(next, tip)
 		}
 	}
-
-	newTips = append(newTips, newVertex)
-	ds.tips = newTips
+	next = append(next, newNode)
+	d.tips = next
 }
 
-// GetTips returns the current frontier of the DAG
-func (ds *DAGState) GetTips() []*types.DAGVertex {
-	ds.mu.RLock()
-	defer ds.mu.RUnlock()
-
-	tips := make([]*types.DAGVertex, len(ds.tips))
-	copy(tips, ds.tips)
-	return tips
+// GetNode returns a state node by root hash.
+func (d *DAG) GetNode(hash types.Hash) *types.StateNode {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.nodes[hash]
 }
 
-// ApplyBlock applies a block's transactions to the state
-func (ds *DAGState) ApplyBlock(block *types.Block) error {
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
+// Tips returns the current DAG frontier.
+func (d *DAG) Tips() []types.Hash {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	out := make([]types.Hash, len(d.tips))
+	copy(out, d.tips)
+	return out
+}
 
-	for _, tx := range block.Txs {
-		if err := ds.applyTransaction(tx); err != nil {
-			return fmt.Errorf("failed to apply transaction %s: %w", tx.ID, err)
+// PruneNonFinal removes nodes not reachable from the finalized root.
+func (d *DAG) PruneNonFinal(finalRoot types.Hash) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	// Mark all reachable nodes from finalRoot.
+	seen := map[types.Hash]struct{}{finalRoot: {}}
+	var walk func(h types.Hash)
+	walk = func(h types.Hash) {
+		for _, child := range d.children[h] {
+			if _, ok := seen[child]; ok {
+				continue
+			}
+			seen[child] = struct{}{}
+			walk(child)
 		}
 	}
-
-	return nil
-}
-
-// applyTransaction applies a single transaction to account state
-func (ds *DAGState) applyTransaction(tx *types.Transaction) error {
-	// Get or create sender account
-	sender, ok := ds.accounts[tx.From]
-	if !ok {
-		sender = &types.AccountState{
-			Address: tx.From,
-			Balance: 0,
-			Nonce:   0,
+	walk(finalRoot)
+	for h := range d.nodes {
+		if _, ok := seen[h]; !ok {
+			delete(d.nodes, h)
+			delete(d.children, h)
 		}
-		ds.accounts[tx.From] = sender
 	}
-
-	// Check nonce
-	if tx.Nonce != sender.Nonce {
-		return fmt.Errorf("invalid nonce: expected %d, got %d", sender.Nonce, tx.Nonce)
-	}
-
-	// Update sender balance
-	if sender.Balance < tx.Amount {
-		return fmt.Errorf("insufficient balance")
-	}
-	sender.Balance -= tx.Amount
-	sender.Nonce++
-
-	// Handle contract call or simple transfer
-	if tx.Contract != nil {
-		// Contract execution happens in contract engine
-		return nil
-	}
-
-	// Simple transfer to recipient
-	recipient, ok := ds.accounts[tx.To]
-	if !ok {
-		recipient = &types.AccountState{
-			Address: tx.To,
-			Balance: 0,
-			Nonce:   0,
+	// Recompute tips.
+	d.tips = d.tips[:0]
+	for h, node := range d.nodes {
+		if len(node.Parents) == 0 {
+			continue
 		}
-		ds.accounts[tx.To] = recipient
+		// Tip if no children remain.
+		if len(d.children[h]) == 0 {
+			d.tips = append(d.tips, h)
+		}
 	}
-
-	recipient.Balance += tx.Amount
-
-	return nil
-}
-
-// GetAccount returns the current state of an account
-func (ds *DAGState) GetAccount(address string) *types.AccountState {
-	ds.mu.RLock()
-	defer ds.mu.RUnlock()
-
-	account, ok := ds.accounts[address]
-	if !ok {
-		return nil
-	}
-
-	// Return a copy to prevent external modification
-	accountCopy := *account
-	return &accountCopy
-}
-
-// GetTopologicalOrder returns blocks in topological order
-func (ds *DAGState) GetTopologicalOrder() []*types.DAGVertex {
-	ds.mu.RLock()
-	defer ds.mu.RUnlock()
-
-	vertices := make([]*types.DAGVertex, 0)
-	for _, v := range ds.vertices {
-		vertices = append(vertices, v)
-	}
-
-	// Sort by topological order
-	sort.Slice(vertices, func(i, j int) bool {
-		return vertices[i].Order < vertices[j].Order
-	})
-
-	return vertices
-}
-
-// GetBlock returns a block by hash
-func (ds *DAGState) GetBlock(hash string) *types.Block {
-	ds.mu.RLock()
-	defer ds.mu.RUnlock()
-
-	if vertex, ok := ds.vertices[hash]; ok {
-		return vertex.Block
-	}
-	return nil
-}
-
-// GetVertex returns a DAG vertex by hash
-func (ds *DAGState) GetVertex(hash string) *types.DAGVertex {
-	ds.mu.RLock()
-	defer ds.mu.RUnlock()
-
-	return ds.vertices[hash]
 }

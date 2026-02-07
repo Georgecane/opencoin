@@ -4,39 +4,128 @@ package opencoin.v1;
 
 option go_package = "github.com/georgecane/opencoin/pb/opencoin/v1";
 
-// Transaction represents a transaction in the blockchain
+// Transaction represents a transaction in the blockchain.
 message Transaction {
-  string id = 1;
-  string from = 2;
-  string to = 3;
-  uint64 amount = 4;
-  ContractCall contract = 5;
-  uint64 nonce = 6;
-  int64 timestamp = 7;
-  bytes signature = 8;
+  string from = 1;
+  string to = 2;
+  uint64 nonce = 3;
+  bytes payload = 4;
+  bytes signature = 5;
 }
 
-// ContractCall represents a smart contract invocation
+// TransactionPayload encodes typed payloads deterministically.
+message TransactionPayload {
+  oneof payload {
+    Transfer transfer = 1;
+    StakeDelegate stake_delegate = 2;
+    StakeUndelegate stake_undelegate = 3;
+    ContractDeploy contract_deploy = 4;
+    ContractCall contract_call = 5;
+    GovernanceProposal governance_proposal = 6;
+    GovernanceVote governance_vote = 7;
+  }
+}
+
+message Transfer {
+  string to = 1;
+  uint64 amount = 2;
+}
+
+message StakeDelegate {
+  string validator = 1;
+  uint64 amount = 2;
+}
+
+message StakeUndelegate {
+  string validator = 1;
+  uint64 amount = 2;
+}
+
+message ContractDeploy {
+  bytes wasm_code = 1;
+  bytes salt = 2;
+}
+
 message ContractCall {
   string address = 1;
   string method = 2;
   repeated bytes args = 3;
-  uint64 gas = 4;
 }
 
-// Block represents a block in the DAG
+message GovernanceProposal {
+  string title = 1;
+  string description = 2;
+  ParamChange param_change = 3;
+}
+
+message ParamChange {
+  string key = 1;
+  string value = 2;
+}
+
+enum VoteOption {
+  VOTE_OPTION_UNSPECIFIED = 0;
+  VOTE_OPTION_YES = 1;
+  VOTE_OPTION_NO = 2;
+  VOTE_OPTION_ABSTAIN = 3;
+  VOTE_OPTION_VETO = 4;
+}
+
+message GovernanceVote {
+  uint64 proposal_id = 1;
+  VoteOption option = 2;
+}
+
+// Block represents a block in the linear consensus.
 message Block {
-  string hash = 1;
-  uint64 height = 2;
-  int64 timestamp = 3;
-  string proposer = 4;
-  repeated string parents = 5;
-  repeated Transaction txs = 6;
-  string state_root = 7;
-  bytes signature = 8;
+  uint64 height = 1;
+  bytes prev_hash = 2;
+  bytes state_root = 3;
+  int64 timestamp = 4;
+  string proposer = 5;
+  repeated Transaction transactions = 6;
+  repeated bytes validator_sigs = 7;
 }
 
-// Validator represents a validator in DPoS
+// StateNode represents a DAG node for state versioning.
+message StateNode {
+  bytes root_hash = 1;
+  repeated bytes parents = 2;
+  uint64 height = 3;
+}
+
+// Consensus messages.
+message Proposal {
+  Block block = 1;
+  uint64 round = 2;
+  bytes proposer_sig = 3;
+}
+
+message PrecommitVote {
+  bytes block_hash = 1;
+  uint64 height = 2;
+  uint64 round = 3;
+  string validator = 4;
+  bytes signature = 5;
+}
+
+message QuorumCertificate {
+  bytes block_hash = 1;
+  uint64 height = 2;
+  uint64 round = 3;
+  bytes sig_bitmap = 4;
+  bytes aggregated_sig = 5;
+  repeated bytes sigs = 6;
+}
+
+message ViewChange {
+  uint64 height = 1;
+  uint64 round = 2;
+  string validator = 3;
+  bytes signature = 4;
+}
+
+// Validator represents a validator in DPoS.
 message Validator {
   string address = 1;
   bytes public_key = 2;
@@ -44,17 +133,21 @@ message Validator {
   uint64 stake = 4;
   map<string, uint64> delegations = 5;
   uint32 commission = 6;
+  uint32 index = 7;
 }
 
-// AccountState represents account balance and nonce
+// AccountState represents account balance, nonce, and RC state.
 message AccountState {
   string address = 1;
   uint64 balance = 2;
   uint64 nonce = 3;
-  bytes code = 4;
+  uint64 stake = 4;
+  uint64 rc = 5;
+  uint64 rc_max = 6;
+  int64 last_rc_effective_time = 7;
+  bytes code = 8;
 }
 
-// Contract represents a deployed smart contract
 message Contract {
   string address = 1;
   string owner = 2;

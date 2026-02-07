@@ -1,3 +1,5 @@
+//go:build cometbft
+
 package network
 
 import (
