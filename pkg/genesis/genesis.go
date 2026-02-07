@@ -22,10 +22,10 @@ type Genesis struct {
 }
 
 type GenesisValidator struct {
-	Address   types.Address `json:"address"`
-	PublicKey []byte        `json:"public_key"`
-	Stake     uint64        `json:"stake"`
-	Commission uint16       `json:"commission"`
+	OperatorAddress types.Address `json:"operator_address"`
+	ConsensusPubKey []byte        `json:"consensus_pubkey"`
+	Stake           uint64        `json:"stake"`
+	Commission      uint16        `json:"commission"`
 }
 
 type GenesisAccount struct {
@@ -67,15 +67,14 @@ func (g *Genesis) Validate() error {
 		if v.Stake < g.MinStake {
 			return fmt.Errorf("validator stake below minimum")
 		}
-		if len(v.PublicKey) == 0 {
-			return fmt.Errorf("validator missing public key")
+		if v.OperatorAddress == "" {
+			return fmt.Errorf("validator missing operator address")
 		}
-		addr, err := crypto.AddressFromPubKey(v.PublicKey)
-		if err != nil {
-			return fmt.Errorf("validator address derivation failed")
+		if _, err := crypto.DecodeAddress(string(v.OperatorAddress)); err != nil {
+			return fmt.Errorf("invalid operator address")
 		}
-		if types.Address(addr) != v.Address {
-			return fmt.Errorf("validator address mismatch")
+		if len(v.ConsensusPubKey) == 0 {
+			return fmt.Errorf("validator missing consensus pubkey")
 		}
 	}
 	return nil

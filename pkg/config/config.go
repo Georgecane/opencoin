@@ -62,6 +62,7 @@ type ConsensusConfig struct {
 type ValidatorConfig struct {
     Enabled        bool   `mapstructure:"enabled"`
     PrivateKeyFile string `mapstructure:"private_key_file"`
+    OperatorAddress string `mapstructure:"operator_address"`
     Stake          uint64 `mapstructure:"stake"`
     Commission     uint16 `mapstructure:"commission"`
 }
@@ -130,6 +131,7 @@ func DefaultConfig() *NodeConfig {
         Validator: ValidatorConfig{
             Enabled:        false,
             PrivateKeyFile: "config/validator_key.json",
+            OperatorAddress: "",
             Stake:          1_000_000_000, // 1000 OCN
             Commission:     1000,          // 10%
         },

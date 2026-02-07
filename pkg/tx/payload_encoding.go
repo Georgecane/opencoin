@@ -8,51 +8,120 @@ import (
 	"github.com/georgecane/opencoin/pkg/types"
 )
 
+// PayloadEnvelope wraps a payload with optional sender pubkey.
+type PayloadEnvelope struct {
+	Payload      Payload
+	SenderPubKey []byte
+}
+
 // EncodePayload deterministically encodes a transaction payload using protobuf wire format.
-func EncodePayload(p Payload) ([]byte, error) {
+func EncodePayload(p Payload, senderPubKey []byte) ([]byte, error) {
 	if p == nil {
 		return nil, fmt.Errorf("payload is nil")
 	}
 
+	var out []byte
 	switch v := p.(type) {
 	case Transfer:
-		return encodeTransfer(v)
+		var err error
+		out, err = encodeTransfer(v)
+		if err != nil {
+			return nil, err
+		}
 	case *Transfer:
-		return encodeTransfer(*v)
+		var err error
+		out, err = encodeTransfer(*v)
+		if err != nil {
+			return nil, err
+		}
 	case StakeDelegate:
-		return encodeStakeDelegate(v)
+		var err error
+		out, err = encodeStakeDelegate(v)
+		if err != nil {
+			return nil, err
+		}
 	case *StakeDelegate:
-		return encodeStakeDelegate(*v)
+		var err error
+		out, err = encodeStakeDelegate(*v)
+		if err != nil {
+			return nil, err
+		}
 	case StakeUndelegate:
-		return encodeStakeUndelegate(v)
+		var err error
+		out, err = encodeStakeUndelegate(v)
+		if err != nil {
+			return nil, err
+		}
 	case *StakeUndelegate:
-		return encodeStakeUndelegate(*v)
+		var err error
+		out, err = encodeStakeUndelegate(*v)
+		if err != nil {
+			return nil, err
+		}
 	case ContractDeploy:
-		return encodeContractDeploy(v)
+		var err error
+		out, err = encodeContractDeploy(v)
+		if err != nil {
+			return nil, err
+		}
 	case *ContractDeploy:
-		return encodeContractDeploy(*v)
+		var err error
+		out, err = encodeContractDeploy(*v)
+		if err != nil {
+			return nil, err
+		}
 	case ContractCall:
-		return encodeContractCall(v)
+		var err error
+		out, err = encodeContractCall(v)
+		if err != nil {
+			return nil, err
+		}
 	case *ContractCall:
-		return encodeContractCall(*v)
+		var err error
+		out, err = encodeContractCall(*v)
+		if err != nil {
+			return nil, err
+		}
 	case GovernanceProposal:
-		return encodeGovernanceProposal(v)
+		var err error
+		out, err = encodeGovernanceProposal(v)
+		if err != nil {
+			return nil, err
+		}
 	case *GovernanceProposal:
-		return encodeGovernanceProposal(*v)
+		var err error
+		out, err = encodeGovernanceProposal(*v)
+		if err != nil {
+			return nil, err
+		}
 	case GovernanceVote:
-		return encodeGovernanceVote(v)
+		var err error
+		out, err = encodeGovernanceVote(v)
+		if err != nil {
+			return nil, err
+		}
 	case *GovernanceVote:
-		return encodeGovernanceVote(*v)
+		var err error
+		out, err = encodeGovernanceVote(*v)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("unknown payload type %T", p)
 	}
+	if len(senderPubKey) > 0 {
+		out = protowire.AppendTag(out, 8, protowire.BytesType)
+		out = protowire.AppendBytes(out, senderPubKey)
+	}
+	return out, nil
 }
 
 // DecodePayload decodes a TransactionPayload into a typed payload.
-func DecodePayload(payload []byte) (Payload, error) {
+func DecodePayload(payload []byte) (*PayloadEnvelope, error) {
 	if len(payload) == 0 {
 		return nil, fmt.Errorf("empty payload")
 	}
+	env := &PayloadEnvelope{}
 	var fieldNum protowire.Number
 	var typ protowire.Type
 	var n int
@@ -62,36 +131,160 @@ func DecodePayload(payload []byte) (Payload, error) {
 			return nil, fmt.Errorf("invalid payload tag")
 		}
 		payload = payload[n:]
-		if typ != protowire.BytesType {
-			return nil, fmt.Errorf("unexpected payload wire type %v", typ)
-		}
-		var b []byte
-		b, n = protowire.ConsumeBytes(payload)
-		if n < 0 {
-			return nil, fmt.Errorf("invalid payload bytes")
-		}
-		payload = payload[n:]
 
 		switch fieldNum {
 		case 1:
-			return decodeTransfer(b)
+			if typ != protowire.BytesType {
+				return nil, fmt.Errorf("unexpected transfer wire type %v", typ)
+			}
+			var b []byte
+			b, n = protowire.ConsumeBytes(payload)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid transfer bytes")
+			}
+			payload = payload[n:]
+			if env.Payload != nil {
+				return nil, fmt.Errorf("duplicate payload")
+			}
+			p, err := decodeTransfer(b)
+			if err != nil {
+				return nil, err
+			}
+			env.Payload = p
 		case 2:
-			return decodeStakeDelegate(b)
+			if typ != protowire.BytesType {
+				return nil, fmt.Errorf("unexpected stake delegate wire type %v", typ)
+			}
+			var b []byte
+			b, n = protowire.ConsumeBytes(payload)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid stake delegate bytes")
+			}
+			payload = payload[n:]
+			if env.Payload != nil {
+				return nil, fmt.Errorf("duplicate payload")
+			}
+			p, err := decodeStakeDelegate(b)
+			if err != nil {
+				return nil, err
+			}
+			env.Payload = p
 		case 3:
-			return decodeStakeUndelegate(b)
+			if typ != protowire.BytesType {
+				return nil, fmt.Errorf("unexpected stake undelegate wire type %v", typ)
+			}
+			var b []byte
+			b, n = protowire.ConsumeBytes(payload)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid stake undelegate bytes")
+			}
+			payload = payload[n:]
+			if env.Payload != nil {
+				return nil, fmt.Errorf("duplicate payload")
+			}
+			p, err := decodeStakeUndelegate(b)
+			if err != nil {
+				return nil, err
+			}
+			env.Payload = p
 		case 4:
-			return decodeContractDeploy(b)
+			if typ != protowire.BytesType {
+				return nil, fmt.Errorf("unexpected contract deploy wire type %v", typ)
+			}
+			var b []byte
+			b, n = protowire.ConsumeBytes(payload)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid contract deploy bytes")
+			}
+			payload = payload[n:]
+			if env.Payload != nil {
+				return nil, fmt.Errorf("duplicate payload")
+			}
+			p, err := decodeContractDeploy(b)
+			if err != nil {
+				return nil, err
+			}
+			env.Payload = p
 		case 5:
-			return decodeContractCall(b)
+			if typ != protowire.BytesType {
+				return nil, fmt.Errorf("unexpected contract call wire type %v", typ)
+			}
+			var b []byte
+			b, n = protowire.ConsumeBytes(payload)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid contract call bytes")
+			}
+			payload = payload[n:]
+			if env.Payload != nil {
+				return nil, fmt.Errorf("duplicate payload")
+			}
+			p, err := decodeContractCall(b)
+			if err != nil {
+				return nil, err
+			}
+			env.Payload = p
 		case 6:
-			return decodeGovernanceProposal(b)
+			if typ != protowire.BytesType {
+				return nil, fmt.Errorf("unexpected governance proposal wire type %v", typ)
+			}
+			var b []byte
+			b, n = protowire.ConsumeBytes(payload)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid governance proposal bytes")
+			}
+			payload = payload[n:]
+			if env.Payload != nil {
+				return nil, fmt.Errorf("duplicate payload")
+			}
+			p, err := decodeGovernanceProposal(b)
+			if err != nil {
+				return nil, err
+			}
+			env.Payload = p
 		case 7:
-			return decodeGovernanceVote(b)
+			if typ != protowire.BytesType {
+				return nil, fmt.Errorf("unexpected governance vote wire type %v", typ)
+			}
+			var b []byte
+			b, n = protowire.ConsumeBytes(payload)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid governance vote bytes")
+			}
+			payload = payload[n:]
+			if env.Payload != nil {
+				return nil, fmt.Errorf("duplicate payload")
+			}
+			p, err := decodeGovernanceVote(b)
+			if err != nil {
+				return nil, err
+			}
+			env.Payload = p
+		case 8:
+			if typ != protowire.BytesType {
+				return nil, fmt.Errorf("unexpected sender_pubkey wire type %v", typ)
+			}
+			if len(env.SenderPubKey) > 0 {
+				return nil, fmt.Errorf("duplicate sender_pubkey")
+			}
+			var b []byte
+			b, n = protowire.ConsumeBytes(payload)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid sender_pubkey bytes")
+			}
+			env.SenderPubKey = append(env.SenderPubKey[:0], b...)
+			payload = payload[n:]
 		default:
-			return nil, fmt.Errorf("unknown payload field %d", fieldNum)
+			n = protowire.ConsumeFieldValue(fieldNum, typ, payload)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid payload field %d", fieldNum)
+			}
+			payload = payload[n:]
 		}
 	}
-	return nil, fmt.Errorf("payload not found")
+	if env.Payload == nil {
+		return nil, fmt.Errorf("payload not found")
+	}
+	return env, nil
 }
 
 func encodeTransfer(t Transfer) ([]byte, error) {

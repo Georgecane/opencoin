@@ -77,8 +77,8 @@ type ViewChange struct {
 
 // Validator represents a validator in DPoS.
 type Validator struct {
-	Address     Address
-	PublicKey   []byte
+	OperatorAddress Address
+	ConsensusPubKey []byte
 	Power       uint64
 	Stake       uint64
 	Delegations map[Address]uint64
@@ -106,6 +106,7 @@ type Account struct {
 	RCMax               uint64
 	LastRCEffectiveTime int64
 	Code                []byte
+	PubKey              []byte
 }
 
 // Contract represents a deployed contract.

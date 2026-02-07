@@ -22,8 +22,17 @@ func HashTransaction(tx *types.Transaction) (types.Hash, error) {
 	return HashBytes(b), nil
 }
 
-// HashBlock computes the canonical block hash.
+// HashBlock computes the canonical block header hash (excluding validator_sigs).
 func HashBlock(block *types.Block) (types.Hash, error) {
+	b, err := MarshalBlockForHash(block)
+	if err != nil {
+		return types.Hash{}, err
+	}
+	return HashBytes(b), nil
+}
+
+// HashBlockFull computes a hash of the full block including validator_sigs.
+func HashBlockFull(block *types.Block) (types.Hash, error) {
 	b, err := MarshalBlock(block)
 	if err != nil {
 		return types.Hash{}, err

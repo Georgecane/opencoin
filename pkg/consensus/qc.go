@@ -32,13 +32,13 @@ func VerifyQC(qc *types.QuorumCertificate, set *types.ValidatorSet, verifier cry
 			BlockHash: qc.BlockHash,
 			Height:    qc.Height,
 			Round:     qc.Round,
-			Validator: v.Address,
+			Validator: v.OperatorAddress,
 		}
 		msg, err := PrecommitSignBytes(vote)
 		if err != nil {
 			return err
 		}
-		if !verifier.Verify(msg, qc.Signatures[i], v.PublicKey) {
+		if !verifier.Verify(msg, qc.Signatures[i], v.ConsensusPubKey) {
 			return fmt.Errorf("invalid signature for validator index %d", i)
 		}
 	}

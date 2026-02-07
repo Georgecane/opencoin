@@ -59,6 +59,34 @@ func MarshalBlock(block *types.Block) ([]byte, error) {
 	return b, nil
 }
 
+// MarshalBlockForHash deterministically encodes a Block header for hashing.
+// This excludes validator_sigs to keep the block hash stable.
+func MarshalBlockForHash(block *types.Block) ([]byte, error) {
+	if block == nil {
+		return nil, fmt.Errorf("block is nil")
+	}
+	var b []byte
+	b = protowire.AppendTag(b, 1, protowire.VarintType)
+	b = protowire.AppendVarint(b, block.Height)
+	b = protowire.AppendTag(b, 2, protowire.BytesType)
+	b = protowire.AppendBytes(b, block.PrevHash[:])
+	b = protowire.AppendTag(b, 3, protowire.BytesType)
+	b = protowire.AppendBytes(b, block.StateRoot[:])
+	b = protowire.AppendTag(b, 4, protowire.VarintType)
+	b = protowire.AppendVarint(b, uint64(block.Timestamp))
+	b = protowire.AppendTag(b, 5, protowire.BytesType)
+	b = protowire.AppendBytes(b, []byte(block.Proposer))
+	for _, tx := range block.Transactions {
+		txBytes, err := MarshalTransaction(tx)
+		if err != nil {
+			return nil, err
+		}
+		b = protowire.AppendTag(b, 6, protowire.BytesType)
+		b = protowire.AppendBytes(b, txBytes)
+	}
+	return b, nil
+}
+
 // MarshalStateNode deterministically encodes a StateNode.
 func MarshalStateNode(node *types.StateNode) ([]byte, error) {
 	if node == nil {

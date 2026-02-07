@@ -1,8 +1,12 @@
 package mempool
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"testing"
 
+	"github.com/georgecane/opencoin/pkg/crypto"
+	"github.com/georgecane/opencoin/pkg/tx"
 	"github.com/georgecane/opencoin/pkg/types"
 )
 
@@ -18,28 +22,34 @@ func (m *mockState) GetAccount(addr types.Address) (*types.Account, error) {
 	return nil, nil
 }
 
-type mockCoster struct{}
+type mockCoster struct {
+	priority types.Address
+}
 
 func (c *mockCoster) Cost(tx *types.Transaction) (uint64, error) {
-	if tx.From == "b" && tx.Nonce == 0 {
+	if tx.From == c.priority && tx.Nonce == 0 {
 		return 10, nil
 	}
 	return 5, nil
 }
 
 func TestMempoolOrdering(t *testing.T) {
+	kpA := keyFromSeed(0x01)
+	kpB := keyFromSeed(0x02)
+	addrA, _ := crypto.AddressFromPubKey(kpA.PublicKey)
+	addrB, _ := crypto.AddressFromPubKey(kpB.PublicKey)
 	state := &mockState{
 		accounts: map[types.Address]*types.Account{
-			"a": {Address: "a", Nonce: 0, RC: 100},
-			"b": {Address: "b", Nonce: 0, RC: 100},
+			types.Address(addrA): {Address: types.Address(addrA), Nonce: 0, RC: 100},
+			types.Address(addrB): {Address: types.Address(addrB), Nonce: 0, RC: 100},
 		},
 	}
-	coster := &mockCoster{}
+	coster := &mockCoster{priority: types.Address(addrB)}
 	mp := New(state, coster)
 
-	txA0 := &types.Transaction{From: "a", To: "x", Nonce: 0}
-	txA1 := &types.Transaction{From: "a", To: "x", Nonce: 1}
-	txB0 := &types.Transaction{From: "b", To: "y", Nonce: 0}
+	txA0 := mustSignedTransfer(t, kpA, types.Address(addrA), "x", 0)
+	txA1 := mustSignedTransfer(t, kpA, types.Address(addrA), "x", 1)
+	txB0 := mustSignedTransfer(t, kpB, types.Address(addrB), "y", 0)
 
 	if err := mp.AddTx(txA0); err != nil {
 		t.Fatalf("add txA0: %v", err)
@@ -59,13 +69,46 @@ func TestMempoolOrdering(t *testing.T) {
 		t.Fatalf("expected 3 selected got %d", len(selected))
 	}
 	// B0 has highest cost, then A0 (nonce order), then A1.
-	if selected[0].From != "b" || selected[0].Nonce != 0 {
+	if selected[0].From != types.Address(addrB) || selected[0].Nonce != 0 {
 		t.Fatalf("unexpected first tx")
 	}
-	if selected[1].From != "a" || selected[1].Nonce != 0 {
+	if selected[1].From != types.Address(addrA) || selected[1].Nonce != 0 {
 		t.Fatalf("unexpected second tx")
 	}
-	if selected[2].From != "a" || selected[2].Nonce != 1 {
+	if selected[2].From != types.Address(addrA) || selected[2].Nonce != 1 {
 		t.Fatalf("unexpected third tx")
 	}
+}
+
+func keyFromSeed(b byte) *crypto.Ed25519KeyPair {
+	seed := bytes.Repeat([]byte{b}, ed25519.SeedSize)
+	priv := ed25519.NewKeyFromSeed(seed)
+	return &crypto.Ed25519KeyPair{
+		PublicKey:  priv.Public().(ed25519.PublicKey),
+		PrivateKey: priv,
+	}
+}
+
+func mustSignedTransfer(t *testing.T, kp *crypto.Ed25519KeyPair, from types.Address, to string, nonce uint64) *types.Transaction {
+	t.Helper()
+	payload, err := tx.EncodePayload(tx.Transfer{To: types.Address(to), Amount: 1}, kp.PublicKey)
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	txn := &types.Transaction{
+		From:    from,
+		To:      types.Address(to),
+		Nonce:   nonce,
+		Payload: payload,
+	}
+	signBytes, err := tx.SigningBytes(txn)
+	if err != nil {
+		t.Fatalf("sign bytes: %v", err)
+	}
+	sig, err := crypto.SignEd25519(kp.PrivateKey, signBytes)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	txn.Signature = sig
+	return txn
 }

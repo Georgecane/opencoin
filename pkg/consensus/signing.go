@@ -12,6 +12,11 @@ func ProposalSignBytes(p *types.Proposal) ([]byte, error) {
 	}
 	cp := *p
 	cp.ProposerSig = nil
+	if cp.Block != nil {
+		blockCopy := *cp.Block
+		blockCopy.ValidatorSigs = nil
+		cp.Block = &blockCopy
+	}
 	return encoding.MarshalProposal(&cp)
 }
 

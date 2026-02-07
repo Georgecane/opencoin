@@ -31,6 +31,10 @@ func marshalAccount(acct *types.Account) ([]byte, error) {
 		b = protowire.AppendTag(b, 8, protowire.BytesType)
 		b = protowire.AppendBytes(b, acct.Code)
 	}
+	if len(acct.PubKey) > 0 {
+		b = protowire.AppendTag(b, 9, protowire.BytesType)
+		b = protowire.AppendBytes(b, acct.PubKey)
+	}
 	return b, nil
 }
 
@@ -122,6 +126,16 @@ func unmarshalAccount(b []byte) (*types.Account, error) {
 				return nil, fmt.Errorf("invalid code")
 			}
 			acct.Code = append(acct.Code[:0], v...)
+			b = b[n:]
+		case 9:
+			if typ != protowire.BytesType {
+				return nil, fmt.Errorf("invalid pub_key type")
+			}
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return nil, fmt.Errorf("invalid pub_key")
+			}
+			acct.PubKey = append(acct.PubKey[:0], v...)
 			b = b[n:]
 		default:
 			n := protowire.ConsumeFieldValue(num, typ, b)

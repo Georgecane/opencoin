@@ -9,6 +9,7 @@ import (
 	"github.com/georgecane/opencoin/pkg/crypto"
 	"github.com/georgecane/opencoin/pkg/encoding"
 	"github.com/georgecane/opencoin/pkg/mempool"
+	"github.com/georgecane/opencoin/pkg/rc"
 	"github.com/georgecane/opencoin/pkg/state"
 	"github.com/georgecane/opencoin/pkg/types"
 )
@@ -52,24 +53,24 @@ type Engine struct {
 }
 
 // NewEngine creates a new consensus engine.
-func NewEngine(cfg Config, st *state.State, dpos *DPoS, mp *mempool.Mempool, contracts *contracts.ContractEngine, signer crypto.Signer, verifier crypto.Verifier, net Network) (*Engine, error) {
-	addr, err := crypto.AddressFromPubKey(signer.PublicKey())
-	if err != nil {
+func NewEngine(cfg Config, st *state.State, dpos *DPoS, mp *mempool.Mempool, contracts *contracts.ContractEngine, operatorAddr types.Address, signer crypto.Signer, verifier crypto.Verifier, net Network) (*Engine, error) {
+	engine := &Engine{
+		cfg:           cfg,
+		state:         st,
+		dpos:          dpos,
+		mempool:       mp,
+		contracts:     contracts,
+		signer:        signer,
+		verifier:      verifier,
+		network:       net,
+		validatorSet:  dpos.ValidatorSet(),
+		votes:         make(map[types.Hash]map[types.Address]*types.PrecommitVote),
+		validatorAddr: operatorAddr,
+	}
+	if err := engine.loadConsensusState(); err != nil {
 		return nil, err
 	}
-	return &Engine{
-		cfg:          cfg,
-		state:        st,
-		dpos:         dpos,
-		mempool:      mp,
-		contracts:    contracts,
-		signer:       signer,
-		verifier:     verifier,
-		network:      net,
-		validatorSet: dpos.ValidatorSet(),
-		votes:        make(map[types.Hash]map[types.Address]*types.PrecommitVote),
-		validatorAddr: types.Address(addr),
-	}, nil
+	return engine, nil
 }
 
 // ProposeBlock builds and broadcasts a new proposal if this node is proposer.
@@ -85,12 +86,12 @@ func (e *Engine) ProposeBlock() (*types.Proposal, error) {
 		return nil, err
 	}
 	block := &types.Block{
-		Height:       e.height + 1,
-		PrevHash:     e.lastFinalized,
-		StateRoot:    types.Hash{},
-		Timestamp:    time.Now().Unix(),
-		Proposer:     e.validatorAddress(),
-		Transactions: txs,
+		Height:        e.height + 1,
+		PrevHash:      e.lastFinalized,
+		StateRoot:     types.Hash{},
+		Timestamp:     time.Now().Unix(),
+		Proposer:      e.validatorAddress(),
+		Transactions:  txs,
 		ValidatorSigs: make([][]byte, len(e.validatorSet.Validators)),
 	}
 	root, err := e.state.PreviewBlock(block, e.contracts)
@@ -130,6 +131,9 @@ func (e *Engine) HandleProposal(prop *types.Proposal) (*types.PrecommitVote, err
 	if prop.Block.Height != e.height+1 {
 		return nil, fmt.Errorf("unexpected height")
 	}
+	if prop.Block.PrevHash != e.lastFinalized {
+		return nil, fmt.Errorf("unexpected previous hash")
+	}
 	if !e.isExpectedProposerLocked(prop.Block.Proposer) {
 		return nil, fmt.Errorf("unexpected proposer")
 	}
@@ -143,6 +147,25 @@ func (e *Engine) HandleProposal(prop *types.Proposal) (*types.PrecommitVote, err
 	}
 	if !e.verifier.Verify(propBytes, prop.ProposerSig, pk) {
 		return nil, fmt.Errorf("invalid proposer signature")
+	}
+	// Validate timestamp window against RC effective time clamp.
+	lastTimestamps, err := e.state.Store().GetLastTimestamps()
+	if err != nil {
+		return nil, err
+	}
+	if len(lastTimestamps) > 0 {
+		effective := rc.EffectiveTime(prop.Block.Timestamp, lastTimestamps, e.state.RCParams().MaxSkewSec)
+		if effective != prop.Block.Timestamp {
+			return nil, fmt.Errorf("block timestamp outside allowed window")
+		}
+	}
+	// Validate state root and transaction semantics deterministically.
+	previewRoot, err := e.state.PreviewBlock(prop.Block, e.contracts)
+	if err != nil {
+		return nil, err
+	}
+	if previewRoot != prop.Block.StateRoot {
+		return nil, fmt.Errorf("state root mismatch")
 	}
 	vote := &types.PrecommitVote{
 		BlockHash: mustHashBlock(prop.Block),
@@ -229,6 +252,7 @@ func (e *Engine) HandleViewChange(vc *types.ViewChange) error {
 	}
 	if vc.Round > e.round {
 		e.round = vc.Round
+		_ = e.persistConsensusState()
 	}
 	return nil
 }
@@ -238,6 +262,7 @@ func (e *Engine) OnTimeout() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.round++
+	_ = e.persistConsensusState()
 }
 
 // FinalizeBlock finalizes the block once QC achieved.
@@ -259,6 +284,9 @@ func (e *Engine) FinalizeBlock(block *types.Block, qc *types.QuorumCertificate, 
 	e.lastFinalized = mustHashBlock(block)
 	e.validatorSet = e.dpos.ValidatorSet()
 	e.round = 0
+	if err := e.persistConsensusState(); err != nil {
+		return err
+	}
 	delete(e.votes, qc.BlockHash)
 	return nil
 }
@@ -310,7 +338,7 @@ func (e *Engine) isExpectedProposerLocked(addr types.Address) bool {
 	for _, v := range e.validatorSet.Validators {
 		acc += v.Power
 		if seed < acc {
-			return v.Address == addr
+			return v.OperatorAddress == addr
 		}
 	}
 	return false
@@ -336,5 +364,32 @@ func (e *Engine) validatorPubKey(addr types.Address) ([]byte, bool) {
 	if int(idx) >= len(e.validatorSet.Validators) {
 		return nil, false
 	}
-	return e.validatorSet.Validators[idx].PublicKey, true
+	return e.validatorSet.Validators[idx].ConsensusPubKey, true
+}
+
+func (e *Engine) loadConsensusState() error {
+	if e.state == nil || e.state.Store() == nil {
+		return nil
+	}
+	height, round, lastFinalized, err := e.state.Store().GetConsensusState()
+	if err != nil {
+		return err
+	}
+	if height > 0 {
+		e.height = height
+	}
+	if round > 0 {
+		e.round = round
+	}
+	if lastFinalized != (types.Hash{}) {
+		e.lastFinalized = lastFinalized
+	}
+	return nil
+}
+
+func (e *Engine) persistConsensusState() error {
+	if e.state == nil || e.state.Store() == nil {
+		return nil
+	}
+	return e.state.Store().SetConsensusState(e.height, e.round, e.lastFinalized)
 }

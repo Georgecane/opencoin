@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/georgecane/opencoin/pkg/encoding"
+	"github.com/georgecane/opencoin/pkg/tx"
 	"github.com/georgecane/opencoin/pkg/types"
 )
 
@@ -37,24 +38,35 @@ func New(state StateView, coster Coster) *Mempool {
 }
 
 // AddTx adds a transaction to the mempool with RC/nonce checks.
-func (m *Mempool) AddTx(tx *types.Transaction) error {
-	if tx == nil {
+func (m *Mempool) AddTx(txn *types.Transaction) error {
+	if txn == nil {
 		return fmt.Errorf("tx is nil")
 	}
-	if tx.From == "" || tx.To == "" {
+	if txn.From == "" || txn.To == "" {
 		return fmt.Errorf("invalid sender or recipient")
 	}
-	acct, err := m.state.GetAccount(tx.From)
+	acct, err := m.state.GetAccount(txn.From)
 	if err != nil {
 		return err
 	}
 	if acct == nil {
-		return fmt.Errorf("account not found")
+		acct = &types.Account{Address: txn.From}
 	}
-	if tx.Nonce < acct.Nonce {
+	env, err := tx.DecodePayload(txn.Payload)
+	if err != nil {
+		return err
+	}
+	pubKey, _, err := tx.ResolveSenderPubKey(txn, acct.PubKey, env.SenderPubKey)
+	if err != nil {
+		return err
+	}
+	if err := tx.VerifySignature(txn, pubKey); err != nil {
+		return err
+	}
+	if txn.Nonce < acct.Nonce {
 		return fmt.Errorf("stale nonce")
 	}
-	cost, err := m.coster.Cost(tx)
+	cost, err := m.coster.Cost(txn)
 	if err != nil {
 		return err
 	}
@@ -64,23 +76,23 @@ func (m *Mempool) AddTx(tx *types.Transaction) error {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	queue := m.pool[tx.From]
+	queue := m.pool[txn.From]
 	// Insert by nonce order.
 	inserted := false
 	for i, existing := range queue {
-		if tx.Nonce == existing.Nonce {
+		if txn.Nonce == existing.Nonce {
 			return fmt.Errorf("duplicate nonce")
 		}
-		if tx.Nonce < existing.Nonce {
-			queue = append(queue[:i], append([]*types.Transaction{tx}, queue[i:]...)...)
+		if txn.Nonce < existing.Nonce {
+			queue = append(queue[:i], append([]*types.Transaction{txn}, queue[i:]...)...)
 			inserted = true
 			break
 		}
 	}
 	if !inserted {
-		queue = append(queue, tx)
+		queue = append(queue, txn)
 	}
-	m.pool[tx.From] = queue
+	m.pool[txn.From] = queue
 	return nil
 }
 

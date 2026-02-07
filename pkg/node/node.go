@@ -87,6 +87,9 @@ func (n *Node) Start(ctx context.Context) error {
 		}
 		signer := crypto.NewDilithiumSigner(kp.PublicKey, kp.PrivateKey)
 		verifier := crypto.NewDilithiumVerifier()
+		if n.cfg.Validator.OperatorAddress == "" {
+			return fmt.Errorf("validator operator_address required")
+		}
 		engine, err := consensus.NewEngine(consensus.Config{
 			EpochLength:   n.cfg.Consensus.EpochLength,
 			MaxValidators: n.cfg.Consensus.MaxValidators,
@@ -96,7 +99,7 @@ func (n *Node) Start(ctx context.Context) error {
 			JailDouble:    n.cfg.Consensus.JailDouble,
 			SlashOffline:  n.cfg.Consensus.SlashOfflineBps,
 			JailOffline:   n.cfg.Consensus.JailOffline,
-		}, n.state, n.dpos, n.mempool, n.contracts, signer, verifier, nil)
+		}, n.state, n.dpos, n.mempool, n.contracts, types.Address(n.cfg.Validator.OperatorAddress), signer, verifier, nil)
 		if err != nil {
 			return err
 		}
@@ -161,7 +164,7 @@ func (n *Node) applyGenesis() error {
 	}
 	// Initialize validators.
 	for _, v := range n.genesis.Validators {
-		if err := n.dpos.RegisterValidator(v.Address, v.PublicKey, v.Stake, v.Commission); err != nil {
+		if err := n.dpos.RegisterValidator(v.OperatorAddress, v.ConsensusPubKey, v.Stake, v.Commission); err != nil {
 			return err
 		}
 	}

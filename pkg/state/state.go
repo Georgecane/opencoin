@@ -3,6 +3,8 @@ package state
 import (
 	"fmt"
 
+	"github.com/cockroachdb/pebble"
+
 	"github.com/georgecane/opencoin/pkg/contracts"
 	"github.com/georgecane/opencoin/pkg/encoding"
 	"github.com/georgecane/opencoin/pkg/rc"
@@ -95,8 +97,24 @@ func (s *State) ApplyBlock(block *types.Block, engine *contracts.ContractEngine)
 	}
 	effectiveTime := rc.EffectiveTime(block.Timestamp, lastTimestamps, s.rcParams.MaxSkewSec)
 
+	batch := s.store.NewIndexedBatch()
+	defer batch.Close()
+
+	get := func(addr types.Address) (*types.Account, error) {
+		acct, err := getAccountFromReader(batch, addr)
+		if err != nil {
+			return nil, err
+		}
+		if acct == nil {
+			return &types.Account{Address: addr}, nil
+		}
+		return acct, nil
+	}
+	set := func(acct *types.Account) error {
+		return setAccountWithWriter(batch, acct, nil)
+	}
 	for _, tx := range block.Transactions {
-		if err := s.applyTransaction(tx, engine, effectiveTime); err != nil {
+		if err := s.applyTransactionWithKV(tx, engine, effectiveTime, get, set, false); err != nil {
 			return types.Hash{}, err
 		}
 	}
@@ -106,12 +124,24 @@ func (s *State) ApplyBlock(block *types.Block, engine *contracts.ContractEngine)
 	if len(lastTimestamps) > s.rcParams.WindowN {
 		lastTimestamps = lastTimestamps[len(lastTimestamps)-s.rcParams.WindowN:]
 	}
-	if err := s.store.SetLastTimestamps(lastTimestamps); err != nil {
+	if err := setLastTimestampsWithWriter(batch, lastTimestamps); err != nil {
 		return types.Hash{}, err
 	}
-
-	root, err := ComputeStateRoot(s.store)
+	root, err := ComputeStateRootFromReader(batch)
 	if err != nil {
+		return types.Hash{}, err
+	}
+	if root != block.StateRoot {
+		return types.Hash{}, fmt.Errorf("state root mismatch after apply")
+	}
+	hash, err := encoding.HashBlock(block)
+	if err != nil {
+		return types.Hash{}, err
+	}
+	if err := setBlockWithWriter(batch, block, hash); err != nil {
+		return types.Hash{}, err
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
 		return types.Hash{}, err
 	}
 	node := &types.StateNode{
@@ -148,17 +178,27 @@ func (s *State) applyTransactionWithKV(txn *types.Transaction, engine *contracts
 	if sender == nil {
 		sender = &types.Account{Address: txn.From}
 	}
+	payloadEnv, err := tx.DecodePayload(txn.Payload)
+	if err != nil {
+		return fmt.Errorf("decode payload: %w", err)
+	}
+	pubKey, register, err := tx.ResolveSenderPubKey(txn, sender.PubKey, payloadEnv.SenderPubKey)
+	if err != nil {
+		return err
+	}
+	if err := tx.VerifySignature(txn, pubKey); err != nil {
+		return err
+	}
+	if register {
+		sender.PubKey = pubKey
+	}
+
 	// RC regeneration for sender.
 	sender.RC, sender.LastRCEffectiveTime = s.rcParams.Regen(sender.RC, sender.Stake, sender.LastRCEffectiveTime, effectiveTime)
 	sender.RCMax = s.rcParams.RCMax(sender.Stake)
 
 	if sender.Nonce != txn.Nonce {
 		return fmt.Errorf("invalid nonce: expected %d, got %d", sender.Nonce, txn.Nonce)
-	}
-
-	payload, err := tx.DecodePayload(txn.Payload)
-	if err != nil {
-		return fmt.Errorf("decode payload: %w", err)
 	}
 
 	sizeBytes, err := encoding.MarshalTransaction(txn)
@@ -169,7 +209,7 @@ func (s *State) applyTransactionWithKV(txn *types.Transaction, engine *contracts
 	var instructions uint64
 	var stateWrites uint64
 
-	switch p := payload.(type) {
+	switch p := payloadEnv.Payload.(type) {
 	case tx.Transfer:
 		if sender.Balance < p.Amount {
 			return fmt.Errorf("insufficient balance")

@@ -11,7 +11,7 @@ import (
 
 // Coster computes RC cost for a transaction.
 type Coster struct {
-	Params   rc.Params
+	Params    rc.Params
 	Contracts *contracts.ContractEngine
 }
 
@@ -20,7 +20,7 @@ func (c *Coster) Cost(txn *types.Transaction) (uint64, error) {
 	if txn == nil {
 		return 0, fmt.Errorf("tx is nil")
 	}
-	payload, err := DecodePayload(txn.Payload)
+	env, err := DecodePayload(txn.Payload)
 	if err != nil {
 		return 0, err
 	}
@@ -31,7 +31,7 @@ func (c *Coster) Cost(txn *types.Transaction) (uint64, error) {
 	var instructions uint64
 	var writes uint64
 
-	switch p := payload.(type) {
+	switch p := env.Payload.(type) {
 	case Transfer:
 		writes = 2
 	case StakeDelegate, StakeUndelegate:

@@ -26,23 +26,23 @@ func NewDPoS(minStake uint64, maxValidators uint32) *DPoS {
 }
 
 // RegisterValidator registers a new validator.
-func (d *DPoS) RegisterValidator(address types.Address, publicKey []byte, stake uint64, commission uint16) error {
+func (d *DPoS) RegisterValidator(operatorAddr types.Address, consensusPubKey []byte, stake uint64, commission uint16) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if stake < d.minStake {
 		return fmt.Errorf("stake below minimum: %d < %d", stake, d.minStake)
 	}
-	if _, exists := d.validators[address]; exists {
-		return fmt.Errorf("validator already registered: %s", address)
+	if _, exists := d.validators[operatorAddr]; exists {
+		return fmt.Errorf("validator already registered: %s", operatorAddr)
 	}
 	if uint32(len(d.validators)) >= d.maxValidators {
 		return fmt.Errorf("max validators reached: %d", d.maxValidators)
 	}
 
-	d.validators[address] = &types.Validator{
-		Address:     address,
-		PublicKey:   publicKey,
+	d.validators[operatorAddr] = &types.Validator{
+		OperatorAddress: operatorAddr,
+		ConsensusPubKey: consensusPubKey,
 		Power:       stake,
 		Stake:       stake,
 		Delegations: make(map[types.Address]uint64),
@@ -122,7 +122,7 @@ func (d *DPoS) ValidatorSet() *types.ValidatorSet {
 	}
 	sort.Slice(validators, func(i, j int) bool {
 		if validators[i].Power == validators[j].Power {
-			return validators[i].Address < validators[j].Address
+			return validators[i].OperatorAddress < validators[j].OperatorAddress
 		}
 		return validators[i].Power > validators[j].Power
 	})
@@ -130,7 +130,7 @@ func (d *DPoS) ValidatorSet() *types.ValidatorSet {
 	index := make(map[types.Address]uint32)
 	for i, v := range validators {
 		v.Index = uint32(i)
-		index[v.Address] = uint32(i)
+		index[v.OperatorAddress] = uint32(i)
 	}
 
 	return &types.ValidatorSet{
@@ -141,10 +141,10 @@ func (d *DPoS) ValidatorSet() *types.ValidatorSet {
 }
 
 // GetValidator returns a validator by address.
-func (d *DPoS) GetValidator(address types.Address) *types.Validator {
+func (d *DPoS) GetValidator(operatorAddr types.Address) *types.Validator {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-	v, ok := d.validators[address]
+	v, ok := d.validators[operatorAddr]
 	if !ok {
 		return nil
 	}

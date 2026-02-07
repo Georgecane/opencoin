@@ -24,6 +24,8 @@ message TransactionPayload {
     GovernanceProposal governance_proposal = 6;
     GovernanceVote governance_vote = 7;
   }
+  // Optional sender public key for signature verification and first-use registration.
+  bytes sender_pubkey = 8;
 }
 
 message Transfer {
@@ -127,8 +129,8 @@ message ViewChange {
 
 // Validator represents a validator in DPoS.
 message Validator {
-  string address = 1;
-  bytes public_key = 2;
+  string operator_address = 1;
+  bytes consensus_pubkey = 2;
   uint64 power = 3;
   uint64 stake = 4;
   map<string, uint64> delegations = 5;
@@ -146,6 +148,7 @@ message AccountState {
   uint64 rc_max = 6;
   int64 last_rc_effective_time = 7;
   bytes code = 8;
+  bytes pub_key = 9;
 }
 
 message Contract {

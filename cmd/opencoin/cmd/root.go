@@ -134,8 +134,7 @@ var keysValidatorCmd = &cobra.Command{
 			fmt.Println("failed to save validator key:", err)
 			os.Exit(1)
 		}
-		addr, _ := crypto.AddressFromPubKey(kp.PublicKey)
-		fmt.Printf("Created validator key %s address %s\n", args[0], addr)
+		fmt.Printf("Created validator key %s consensus_pubkey %x\n", args[0], kp.PublicKey)
 	},
 }
 
@@ -201,7 +200,7 @@ var txTransferCmd = &cobra.Command{
 		payload, err := tx.EncodePayload(tx.Transfer{
 			To:     types.Address(to),
 			Amount: amount,
-		})
+		}, kp.PublicKey)
 		if err != nil {
 			fmt.Println("failed to encode payload:", err)
 			os.Exit(1)
