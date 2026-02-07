@@ -96,7 +96,7 @@ func (n *Node) Start(ctx context.Context) error {
 			JailDouble:    n.cfg.Consensus.JailDouble,
 			SlashOffline:  n.cfg.Consensus.SlashOfflineBps,
 			JailOffline:   n.cfg.Consensus.JailOffline,
-		}, n.state, n.dpos, n.mempool, signer, verifier, nil)
+		}, n.state, n.dpos, n.mempool, n.contracts, signer, verifier, nil)
 		if err != nil {
 			return err
 		}

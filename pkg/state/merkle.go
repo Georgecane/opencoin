@@ -4,17 +4,24 @@ import (
 	"crypto/sha256"
 	"sort"
 
+	"github.com/cockroachdb/pebble"
+
 	"github.com/georgecane/opencoin/pkg/types"
 )
 
 // ComputeStateRoot computes a deterministic Merkle root over account state.
 func ComputeStateRoot(store *Store) (types.Hash, error) {
+	return ComputeStateRootFromReader(store.db)
+}
+
+// ComputeStateRootFromReader computes a deterministic Merkle root over a reader view.
+func ComputeStateRootFromReader(reader pebble.Reader) (types.Hash, error) {
 	type kv struct {
 		key []byte
 		val []byte
 	}
 	var items []kv
-	err := store.IterateAccounts(func(key []byte, acct *types.Account) error {
+	err := iterateAccounts(reader, func(key []byte, acct *types.Account) error {
 		val, err := marshalAccount(acct)
 		if err != nil {
 			return err

@@ -165,9 +165,16 @@ func (ce *ContractEngine) ExecuteContract(ctx *ExecutionContext) ([]byte, error)
 	}
 
 	// Call the function with no parameters
-	results, err := fn.Call(ce.withCallDepthListener())
-	if err != nil {
-		return nil, fmt.Errorf("wasm contract handle failed: %w", err)
+	var results []uint64
+	var callErr error
+	defer func() {
+		if r := recover(); r != nil {
+			callErr = fmt.Errorf("wasm trap: %v", r)
+		}
+	}()
+	results, callErr = fn.Call(ce.withCallDepthListener())
+	if callErr != nil {
+		return nil, fmt.Errorf("wasm contract handle failed: %w", callErr)
 	}
 
 	// Return raw results as bytes (if any uint64 results exist, encode them)

@@ -40,10 +40,29 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// NewIndexedBatch creates a new indexed batch for previewing state changes.
+func (s *Store) NewIndexedBatch() *pebble.Batch {
+	return s.db.NewIndexedBatch()
+}
+
 // GetAccount returns the account state for an address.
 func (s *Store) GetAccount(addr types.Address) (*types.Account, error) {
+	return getAccountFromReader(s.db, addr)
+}
+
+// SetAccount persists an account state.
+func (s *Store) SetAccount(acct *types.Account) error {
+	return setAccountWithWriter(s.db, acct, pebble.Sync)
+}
+
+// IterateAccounts iterates over all account entries.
+func (s *Store) IterateAccounts(fn func(key []byte, acct *types.Account) error) error {
+	return iterateAccounts(s.db, fn)
+}
+
+func getAccountFromReader(reader pebble.Reader, addr types.Address) (*types.Account, error) {
 	key := []byte(accountPrefix + string(addr))
-	val, closer, err := s.db.Get(key)
+	val, closer, err := reader.Get(key)
 	if err != nil {
 		if err == pebble.ErrNotFound {
 			return nil, nil
@@ -54,8 +73,7 @@ func (s *Store) GetAccount(addr types.Address) (*types.Account, error) {
 	return unmarshalAccount(val)
 }
 
-// SetAccount persists an account state.
-func (s *Store) SetAccount(acct *types.Account) error {
+func setAccountWithWriter(writer pebble.Writer, acct *types.Account, opts *pebble.WriteOptions) error {
 	if acct == nil {
 		return fmt.Errorf("account is nil")
 	}
@@ -64,12 +82,11 @@ func (s *Store) SetAccount(acct *types.Account) error {
 	if err != nil {
 		return err
 	}
-	return s.db.Set(key, val, pebble.Sync)
+	return writer.Set(key, val, opts)
 }
 
-// IterateAccounts iterates over all account entries.
-func (s *Store) IterateAccounts(fn func(key []byte, acct *types.Account) error) error {
-	iter, err := s.db.NewIter(&pebble.IterOptions{
+func iterateAccounts(reader pebble.Reader, fn func(key []byte, acct *types.Account) error) error {
+	iter, err := reader.NewIter(&pebble.IterOptions{
 		LowerBound: []byte(accountPrefix),
 		UpperBound: []byte(accountPrefix + string([]byte{0xFF})),
 	})

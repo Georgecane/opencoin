@@ -39,6 +39,7 @@ type Engine struct {
 	state         *state.State
 	dpos          *DPoS
 	mempool       *mempool.Mempool
+	contracts     *contracts.ContractEngine
 	verifier      crypto.Verifier
 	signer        crypto.Signer
 	network       Network
@@ -51,7 +52,7 @@ type Engine struct {
 }
 
 // NewEngine creates a new consensus engine.
-func NewEngine(cfg Config, st *state.State, dpos *DPoS, mp *mempool.Mempool, signer crypto.Signer, verifier crypto.Verifier, net Network) (*Engine, error) {
+func NewEngine(cfg Config, st *state.State, dpos *DPoS, mp *mempool.Mempool, contracts *contracts.ContractEngine, signer crypto.Signer, verifier crypto.Verifier, net Network) (*Engine, error) {
 	addr, err := crypto.AddressFromPubKey(signer.PublicKey())
 	if err != nil {
 		return nil, err
@@ -61,6 +62,7 @@ func NewEngine(cfg Config, st *state.State, dpos *DPoS, mp *mempool.Mempool, sig
 		state:        st,
 		dpos:         dpos,
 		mempool:      mp,
+		contracts:    contracts,
 		signer:       signer,
 		verifier:     verifier,
 		network:      net,
@@ -91,11 +93,11 @@ func (e *Engine) ProposeBlock() (*types.Proposal, error) {
 		Transactions: txs,
 		ValidatorSigs: make([][]byte, len(e.validatorSet.Validators)),
 	}
-	blockHash, err := encoding.HashBlock(block)
+	root, err := e.state.PreviewBlock(block, e.contracts)
 	if err != nil {
 		return nil, err
 	}
-	block.StateRoot = blockHash // placeholder until state applied
+	block.StateRoot = root
 	prop := &types.Proposal{
 		Block: block,
 		Round: e.round,

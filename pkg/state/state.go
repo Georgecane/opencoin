@@ -40,10 +40,54 @@ func (s *State) GetAccount(addr types.Address) (*types.Account, error) {
 	return acct, nil
 }
 
+// PreviewBlock computes the expected state root for a block without mutating persistent state.
+func (s *State) PreviewBlock(block *types.Block, engine *contracts.ContractEngine) (types.Hash, error) {
+	if block == nil {
+		return types.Hash{}, fmt.Errorf("block is nil")
+	}
+	lastTimestamps, err := s.store.GetLastTimestamps()
+	if err != nil {
+		return types.Hash{}, err
+	}
+	effectiveTime := rc.EffectiveTime(block.Timestamp, lastTimestamps, s.rcParams.MaxSkewSec)
+
+	batch := s.store.NewIndexedBatch()
+	defer batch.Close()
+
+	get := func(addr types.Address) (*types.Account, error) {
+		acct, err := getAccountFromReader(batch, addr)
+		if err != nil {
+			return nil, err
+		}
+		if acct == nil {
+			return &types.Account{Address: addr}, nil
+		}
+		return acct, nil
+	}
+	set := func(acct *types.Account) error {
+		return setAccountWithWriter(batch, acct, nil)
+	}
+
+	for _, tx := range block.Transactions {
+		if err := s.applyTransactionWithKV(tx, engine, effectiveTime, get, set, true); err != nil {
+			return types.Hash{}, err
+		}
+	}
+
+	return ComputeStateRootFromReader(batch)
+}
+
 // ApplyBlock applies a block to state, updating RC and computing a new state root.
 func (s *State) ApplyBlock(block *types.Block, engine *contracts.ContractEngine) (types.Hash, error) {
 	if block == nil {
 		return types.Hash{}, fmt.Errorf("block is nil")
+	}
+	previewRoot, err := s.PreviewBlock(block, engine)
+	if err != nil {
+		return types.Hash{}, err
+	}
+	if block.StateRoot != previewRoot {
+		return types.Hash{}, fmt.Errorf("state root mismatch")
 	}
 	lastTimestamps, err := s.store.GetLastTimestamps()
 	if err != nil {
@@ -80,6 +124,16 @@ func (s *State) ApplyBlock(block *types.Block, engine *contracts.ContractEngine)
 }
 
 func (s *State) applyTransaction(txn *types.Transaction, engine *contracts.ContractEngine, effectiveTime int64) error {
+	get := func(addr types.Address) (*types.Account, error) {
+		return s.GetAccount(addr)
+	}
+	set := func(acct *types.Account) error {
+		return s.store.SetAccount(acct)
+	}
+	return s.applyTransactionWithKV(txn, engine, effectiveTime, get, set, false)
+}
+
+func (s *State) applyTransactionWithKV(txn *types.Transaction, engine *contracts.ContractEngine, effectiveTime int64, get func(types.Address) (*types.Account, error), set func(*types.Account) error, preview bool) error {
 	if txn == nil {
 		return fmt.Errorf("transaction is nil")
 	}
@@ -87,9 +141,12 @@ func (s *State) applyTransaction(txn *types.Transaction, engine *contracts.Contr
 		return fmt.Errorf("invalid sender or recipient")
 	}
 
-	sender, err := s.GetAccount(txn.From)
+	sender, err := get(txn.From)
 	if err != nil {
 		return err
+	}
+	if sender == nil {
+		sender = &types.Account{Address: txn.From}
 	}
 	// RC regeneration for sender.
 	sender.RC, sender.LastRCEffectiveTime = s.rcParams.Regen(sender.RC, sender.Stake, sender.LastRCEffectiveTime, effectiveTime)
@@ -118,12 +175,15 @@ func (s *State) applyTransaction(txn *types.Transaction, engine *contracts.Contr
 			return fmt.Errorf("insufficient balance")
 		}
 		sender.Balance -= p.Amount
-		receiver, err := s.GetAccount(p.To)
+		receiver, err := get(p.To)
 		if err != nil {
 			return err
 		}
+		if receiver == nil {
+			receiver = &types.Account{Address: p.To}
+		}
 		receiver.Balance += p.Amount
-		if err := s.store.SetAccount(receiver); err != nil {
+		if err := set(receiver); err != nil {
 			return err
 		}
 		stateWrites = 2
@@ -142,32 +202,50 @@ func (s *State) applyTransaction(txn *types.Transaction, engine *contracts.Contr
 		sender.Balance += p.Amount
 		stateWrites = 1
 	case tx.ContractDeploy:
+		if engine == nil {
+			return fmt.Errorf("contract engine not configured")
+		}
 		addr := txn.To
 		if addr == "" {
 			return fmt.Errorf("contract deploy missing target address")
 		}
-		if err := engine.DeployContract(string(addr), p.WASMCode, string(addr)); err != nil {
+		if !preview {
+			if err := engine.DeployContract(string(addr), p.WASMCode, string(addr)); err != nil {
+				return err
+			}
+		} else if err := contracts.ValidateWasmCode(p.WASMCode); err != nil {
 			return err
 		}
-		contractAcct, err := s.GetAccount(addr)
+		contractAcct, err := get(addr)
 		if err != nil {
 			return err
 		}
+		if contractAcct == nil {
+			contractAcct = &types.Account{Address: addr}
+		}
 		contractAcct.Code = append(contractAcct.Code[:0], p.WASMCode...)
-		if err := s.store.SetAccount(contractAcct); err != nil {
+		if err := set(contractAcct); err != nil {
 			return err
 		}
 		stateWrites = 1
 	case tx.ContractCall:
-		result, err := engine.ExecuteContractWithResult(&contracts.ExecutionContext{
-			Caller:       string(txn.From),
-			ContractAddr: string(p.Address),
-		})
-		if err != nil {
-			return err
+		if engine == nil {
+			return fmt.Errorf("contract engine not configured")
 		}
-		instructions = result.Instructions
-		stateWrites = result.StateWrites
+		if preview {
+			instructions = engine.EstimateContractCall(string(p.Address))
+			stateWrites = engine.EstimateStateWrites(string(p.Address))
+		} else {
+			result, err := engine.ExecuteContractWithResult(&contracts.ExecutionContext{
+				Caller:       string(txn.From),
+				ContractAddr: string(p.Address),
+			})
+			if err != nil {
+				return err
+			}
+			instructions = result.Instructions
+			stateWrites = result.StateWrites
+		}
 	case tx.GovernanceProposal:
 		// Governance state handled in governance module; minimal placeholder.
 		stateWrites = 1
@@ -185,5 +263,5 @@ func (s *State) applyTransaction(txn *types.Transaction, engine *contracts.Contr
 	sender.Nonce++
 	sender.RCMax = s.rcParams.RCMax(sender.Stake)
 
-	return s.store.SetAccount(sender)
+	return set(sender)
 }
